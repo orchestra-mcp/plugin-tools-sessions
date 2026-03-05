@@ -1,0 +1,16 @@
+2026/03/04 14:14:01 [serve] storage.markdown initialized (workspace: /Users/fadymondy/Sites/orchestra-agents/libs/plugin-tools-sessions)
+2026/03/04 14:14:01 [inprocess] registered plugin "tools.features" (49 tools, 0 prompts)
+2026/03/04 14:14:01 [serve] tools.features initialized (49 tools)
+2026/03/04 14:14:01 [inprocess] registered plugin "tools.marketplace" (15 tools, 5 prompts)
+2026/03/04 14:14:01 [serve] tools.marketplace initialized (15 tools)
+2026/03/04 14:14:01 [inprocess] QUIC bridge listening on 127.0.0.1:57110 (for child plugin storage/cross-plugin calls)
+2026/03/04 14:14:01 [inprocess] registered external plugin "bridge.claude" (8 tools)
+2026/03/04 14:14:01 [pluginloader] bridge.claude loaded (8 tools, addr: 127.0.0.1:49997)
+2026/03/04 14:14:01 [inprocess] registered external plugin "tools.agentops" (8 tools)
+2026/03/04 14:14:01 [pluginloader] tools.agentops loaded (8 tools, addr: 127.0.0.1:50550)
+2026/03/04 14:14:01 [inprocess] registered external plugin "tools.notes" (8 tools)
+2026/03/04 14:14:01 [pluginloader] tools.notes loaded (8 tools, addr: 127.0.0.1:64916)
+2026/03/04 14:14:01 [inprocess] registered external plugin "tools.sessions" (6 tools)
+2026/03/04 14:14:01 [pluginloader] tools.sessions loaded (6 tools, addr: 127.0.0.1:63370)
+2026/03/04 14:14:01 [serve] ready — 93 tools from 3 core + 4 external plugins
+2026/03/04 14:14:01 [serve] TCP server error: tcp listen localhost:50101: listen tcp 127.0.0.1:50101: bind: address already in use

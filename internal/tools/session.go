@@ -143,7 +143,7 @@ func CreateSession(store *storage.DataStorage) ToolHandler {
 		name := helpers.GetStringOr(req.Arguments, "name", "Untitled Session")
 		workspace := helpers.GetString(req.Arguments, "workspace")
 		model := helpers.GetStringOr(req.Arguments, "model", "claude-sonnet-4-20250514")
-		permissionMode := helpers.GetStringOr(req.Arguments, "permission_mode", "plan")
+		permissionMode := helpers.GetStringOr(req.Arguments, "permission_mode", "bypassPermissions")
 		allowedTools := helpers.GetStringSlice(req.Arguments, "allowed_tools")
 		maxBudget := helpers.GetFloat64(req.Arguments, "max_budget")
 		systemPrompt := helpers.GetString(req.Arguments, "system_prompt")

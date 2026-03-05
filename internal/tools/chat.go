@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	pluginv1 "github.com/orchestra-mcp/gen-go/orchestra/plugin/v1"
@@ -89,7 +90,12 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 
 		// Step 4: Call bridge spawn_session.
 		startTime := time.Now()
-		resume := session.MessageCount > 0
+		// Resume only when we have a confirmed Claude session ID from a
+		// previous *successful* response. ClaudeSessionID is set only after
+		// a response containing a valid session ID is received.
+		// MessageCount alone is not reliable because it gets incremented
+		// even on failed turns (empty responses, process errors).
+		resume := session.ClaudeSessionID != ""
 
 		// Prepend system prompt to the first message if configured.
 		prompt := message
@@ -112,6 +118,11 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 		model := extractString(spawnResp, "model")
 		if model == "" {
 			model = session.Model
+		}
+		// Capture the actual claude session ID from a successful response.
+		// This is what we use for --resume on subsequent turns.
+		if claudeID := extractClaudeSessionID(spawnResp, responseText); claudeID != "" {
+			session.ClaudeSessionID = claudeID
 		}
 
 		// Step 5: Store turn file.
@@ -229,8 +240,14 @@ func spawnSession(ctx context.Context, store *storage.DataStorage, session *stor
 		envJSON = []byte("{}")
 	}
 
+	// When resuming, use the actual claude session ID (not our Orchestra ID).
+	sessionIDForBridge := session.ID
+	if resume && session.ClaudeSessionID != "" {
+		sessionIDForBridge = session.ClaudeSessionID
+	}
+
 	args := map[string]any{
-		"session_id": session.ID,
+		"session_id": sessionIDForBridge,
 		"prompt":     prompt,
 		"env":        string(envJSON),
 		"resume":     resume,
@@ -338,12 +355,36 @@ func extractFloat64(resp *pluginv1.ToolResponse, key string) float64 {
 	return nv.NumberValue
 }
 
+// extractClaudeSessionID extracts the actual claude session UUID from the
+// bridge response text. The formatChatResponse in bridge-claude embeds the
+// session ID as "- **Session:** <uuid>". We parse that line to get the real
+// claude session ID for --resume on subsequent turns.
+func extractClaudeSessionID(resp *pluginv1.ToolResponse, responseText string) string {
+	_ = resp // reserved for future structured field extraction
+	// Look for the "- **Session:** <uuid>" line embedded by formatChatResponse.
+	for _, line := range strings.Split(responseText, "\n") {
+		line = strings.TrimSpace(line)
+		const prefix = "- **Session:** "
+		if strings.HasPrefix(line, prefix) {
+			id := strings.TrimPrefix(line, prefix)
+			id = strings.TrimSpace(id)
+			// Basic UUID validation: 36 chars with dashes.
+			if len(id) == 36 && strings.Count(id, "-") == 4 {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 // ---------- Markdown formatter ----------
 
 func formatTurnResponseMD(turn *storage.Turn, session *storage.Session) string {
-	return fmt.Sprintf("### Turn %d — %s\n\n%s\n\n---\n\n_Model: %s | Tokens: %d in / %d out | Cost: $%.4f | Duration: %dms | Session total: $%.4f_\n",
-		turn.Number, turn.Timestamp,
+	// Response text first — no "### Turn N" header since the Swift UI renders
+	// the text directly as the assistant message content. Metadata lines use
+	// the "- **Key:** value" format so ChatPlugin.extractMetadata() can strip them.
+	return fmt.Sprintf("%s\n\n---\n- **Session:** %s\n- **Model:** %s\n- **Tokens:** %d in / %d out\n- **Cost:** $%.4f\n- **Duration:** %dms\n",
 		turn.Response,
-		turn.Model, turn.TokensIn, turn.TokensOut, turn.CostUSD, turn.DurationMs,
-		session.TotalCostUSD)
+		session.ClaudeSessionID,
+		turn.Model, turn.TokensIn, turn.TokensOut, turn.CostUSD, turn.DurationMs)
 }

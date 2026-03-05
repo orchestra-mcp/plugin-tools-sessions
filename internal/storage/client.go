@@ -53,6 +53,10 @@ type Session struct {
 	TotalTokensIn  int64    `json:"total_tokens_in"`
 	TotalTokensOut int64    `json:"total_tokens_out"`
 	TotalCostUSD   float64  `json:"total_cost_usd"`
+	// ClaudeSessionID is the actual session UUID returned by the claude CLI
+	// after a successful invocation. Empty until the first successful turn.
+	// Used for --resume on subsequent messages.
+	ClaudeSessionID string `json:"claude_session_id,omitempty"`
 }
 
 // Turn represents a single conversation turn within a session.
@@ -399,6 +403,9 @@ func sessionToMetadata(s *Session) (*structpb.Struct, error) {
 		"total_tokens_in":  float64(s.TotalTokensIn),
 		"total_tokens_out": float64(s.TotalTokensOut),
 		"total_cost_usd":   s.TotalCostUSD,
+	}
+	if s.ClaudeSessionID != "" {
+		m["claude_session_id"] = s.ClaudeSessionID
 	}
 	if len(s.AllowedTools) > 0 {
 		tools := make([]any, len(s.AllowedTools))
