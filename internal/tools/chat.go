@@ -26,6 +26,10 @@ func SendMessageSchema() *structpb.Struct {
 				"type":        "string",
 				"description": "Message to send to Claude Code",
 			},
+			"permission_mode": map[string]any{
+				"type":        "string",
+				"description": "Override the session's permission mode for this message (e.g., default, plan, bypassPermissions)",
+			},
 		},
 		"required": []any{"session_id", "message"},
 	})
@@ -51,6 +55,7 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 
 		sessionID := helpers.GetString(req.Arguments, "session_id")
 		message := helpers.GetString(req.Arguments, "message")
+		permissionModeOverride := helpers.GetString(req.Arguments, "permission_mode")
 
 		// Step 1: Read session metadata.
 		session, version, err := store.ReadSession(ctx, sessionID)
@@ -86,6 +91,12 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 					fmt.Sprintf("session budget exceeded: $%.2f / $%.2f",
 						session.TotalCostUSD, session.MaxBudget)), nil
 			}
+		}
+
+		// Allow per-message permission_mode override so the frontend can
+		// switch between auto/manual without recreating the session.
+		if permissionModeOverride != "" {
+			session.PermissionMode = permissionModeOverride
 		}
 
 		// Step 4: Call bridge spawn_session.
@@ -162,9 +173,21 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 			_ = err
 		}
 
-		// Step 8: Return the AI response.
-		md := formatTurnResponseMD(turn, session)
-		return helpers.TextResult(md), nil
+		// Step 8: Return the AI response as structured JSON.
+		resp, err := helpers.JSONResult(map[string]any{
+			"response":    turn.Response,
+			"session_id":  session.ClaudeSessionID,
+			"model":       turn.Model,
+			"tokens_in":   turn.TokensIn,
+			"tokens_out":  turn.TokensOut,
+			"cost":        turn.CostUSD,
+			"duration_ms": turn.DurationMs,
+		})
+		if err != nil {
+			// Fallback: return just the response text.
+			return helpers.TextResult(turn.Response), nil
+		}
+		return resp, nil
 	}
 }
 
@@ -377,14 +400,3 @@ func extractClaudeSessionID(resp *pluginv1.ToolResponse, responseText string) st
 	return ""
 }
 
-// ---------- Markdown formatter ----------
-
-func formatTurnResponseMD(turn *storage.Turn, session *storage.Session) string {
-	// Response text first — no "### Turn N" header since the Swift UI renders
-	// the text directly as the assistant message content. Metadata lines use
-	// the "- **Key:** value" format so ChatPlugin.extractMetadata() can strip them.
-	return fmt.Sprintf("%s\n\n---\n- **Session:** %s\n- **Model:** %s\n- **Tokens:** %d in / %d out\n- **Cost:** $%.4f\n- **Duration:** %dms\n",
-		turn.Response,
-		session.ClaudeSessionID,
-		turn.Model, turn.TokensIn, turn.TokensOut, turn.CostUSD, turn.DurationMs)
-}

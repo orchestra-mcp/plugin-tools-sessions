@@ -74,17 +74,50 @@ type Turn struct {
 
 // ---------- Session operations ----------
 
-// ReadSession loads a session by ID from storage.
-func (ds *DataStorage) ReadSession(ctx context.Context, sessionID string) (*Session, int64, error) {
+// resolveSessionID resolves a (possibly prefix) session ID to the full ID.
+// If the exact path exists, it returns the ID as-is. Otherwise it searches
+// for a session file starting with the given prefix.
+func (ds *DataStorage) resolveSessionID(ctx context.Context, sessionID string) (string, error) {
+	// Try exact match first.
 	path := sessionPath(sessionID)
+	if _, err := ds.storageRead(ctx, path); err == nil {
+		return sessionID, nil
+	}
+
+	// Prefix match: list all sessions and find one starting with the given ID.
+	entries, err := ds.storageList(ctx, "bridge/sessions/", "*.md")
+	if err != nil {
+		return "", fmt.Errorf("session %q not found", sessionID)
+	}
+	for _, entry := range entries {
+		base := filepath.Base(entry.GetPath())
+		if !strings.HasSuffix(base, ".md") {
+			continue
+		}
+		id := strings.TrimSuffix(base, ".md")
+		if strings.HasPrefix(id, sessionID) {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("session %q not found", sessionID)
+}
+
+// ReadSession loads a session by ID from storage.
+// Supports both full UUIDs and prefix matches (e.g. first 8 chars).
+func (ds *DataStorage) ReadSession(ctx context.Context, sessionID string) (*Session, int64, error) {
+	resolved, err := ds.resolveSessionID(ctx, sessionID)
+	if err != nil {
+		return nil, 0, err
+	}
+	path := sessionPath(resolved)
 	resp, err := ds.storageRead(ctx, path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read session %s: %w", sessionID, err)
+		return nil, 0, fmt.Errorf("read session %s: %w", resolved, err)
 	}
 
 	session, err := metadataToSession(resp.Metadata)
 	if err != nil {
-		return nil, 0, fmt.Errorf("parse session %s: %w", sessionID, err)
+		return nil, 0, fmt.Errorf("parse session %s: %w", resolved, err)
 	}
 	return session, resp.Version, nil
 }
@@ -138,17 +171,23 @@ func (ds *DataStorage) ListSessions(ctx context.Context, status, accountID strin
 
 // DeleteSession removes a session and all its turn files from storage.
 func (ds *DataStorage) DeleteSession(ctx context.Context, sessionID string) error {
+	// Resolve prefix to full ID.
+	resolved, err := ds.resolveSessionID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+
 	// Delete all turn files first.
-	turns, err := ds.ListTurns(ctx, sessionID)
+	turns, err := ds.ListTurns(ctx, resolved)
 	if err == nil {
 		for _, t := range turns {
-			turnPath := turnFilePath(sessionID, t.Number)
+			turnPath := turnFilePath(resolved, t.Number)
 			_ = ds.storageDelete(ctx, turnPath) // best effort
 		}
 	}
 
 	// Delete the session metadata file.
-	path := sessionPath(sessionID)
+	path := sessionPath(resolved)
 	return ds.storageDelete(ctx, path)
 }
 

@@ -207,6 +207,8 @@ func ListSessions(store *storage.DataStorage) ToolHandler {
 }
 
 // GetSession returns session details with the last N turn messages.
+// Returns structured JSON so frontends can render clean messages without
+// parsing metadata from markdown.
 func GetSession(store *storage.DataStorage) ToolHandler {
 	return func(ctx context.Context, req *pluginv1.ToolRequest) (*pluginv1.ToolResponse, error) {
 		if err := helpers.ValidateRequired(req.Arguments, "session_id"); err != nil {
@@ -230,8 +232,14 @@ func GetSession(store *storage.DataStorage) ToolHandler {
 			turns = nil
 		}
 
-		md := formatSessionDetailMD(session, turns)
-		return helpers.TextResult(md), nil
+		detail := buildSessionDetailJSON(session, turns)
+		resp, err := helpers.JSONResult(detail)
+		if err != nil {
+			// Fallback to markdown if JSON serialization fails.
+			md := formatSessionDetailMD(session, turns)
+			return helpers.TextResult(md), nil
+		}
+		return resp, nil
 	}
 }
 
@@ -341,41 +349,76 @@ func formatSessionListMD(sessions []*storage.Session, statusFilter string) strin
 		if len(name) > 30 {
 			name = name[:27] + "..."
 		}
-		idShort := s.ID
-		if len(idShort) > 8 {
-			idShort = idShort[:8]
-		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %d | $%.2f |\n",
-			idShort, name, s.AccountID, s.Status, s.MessageCount, s.TotalCostUSD)
+			s.ID, name, s.AccountID, s.Status, s.MessageCount, s.TotalCostUSD)
 	}
 	return b.String()
 }
 
+// sessionDetailJSON is the structured response for get_session.
+// It separates session metadata, turns (with clean user/assistant content),
+// and per-turn usage stats so frontends don't need to parse markdown.
+type sessionDetailJSON struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Account   string          `json:"account"`
+	Model     string          `json:"model"`
+	Provider  string          `json:"provider,omitempty"`
+	Status    string          `json:"status"`
+	Messages  int             `json:"messages"`
+	CreatedAt string          `json:"created_at"`
+	Turns     []turnJSON      `json:"turns"`
+}
+
+type turnJSON struct {
+	Number    int     `json:"number"`
+	User      string  `json:"user"`
+	Assistant string  `json:"assistant"`
+	Model     string  `json:"model,omitempty"`
+	TokensIn  int64   `json:"tokens_in,omitempty"`
+	TokensOut int64   `json:"tokens_out,omitempty"`
+	Cost      float64 `json:"cost,omitempty"`
+	Duration  int64   `json:"duration_ms,omitempty"`
+	Timestamp string  `json:"timestamp"`
+}
+
+func buildSessionDetailJSON(s *storage.Session, turns []*storage.Turn) *sessionDetailJSON {
+	detail := &sessionDetailJSON{
+		ID:        s.ID,
+		Name:      s.Name,
+		Account:   s.AccountID,
+		Model:     s.Model,
+		Status:    s.Status,
+		Messages:  s.MessageCount,
+		CreatedAt: s.CreatedAt,
+		Turns:     make([]turnJSON, 0, len(turns)),
+	}
+	for _, t := range turns {
+		detail.Turns = append(detail.Turns, turnJSON{
+			Number:    t.Number,
+			User:      t.UserPrompt,
+			Assistant: t.Response,
+			Model:     t.Model,
+			TokensIn:  t.TokensIn,
+			TokensOut: t.TokensOut,
+			Cost:      t.CostUSD,
+			Duration:  t.DurationMs,
+			Timestamp: t.Timestamp,
+		})
+	}
+	return detail
+}
+
+// formatSessionDetailMD is kept for backward compatibility with CLI/IDE consumers.
 func formatSessionDetailMD(s *storage.Session, turns []*storage.Turn) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Session: %s\n\n", s.Name)
 	fmt.Fprintf(&b, "- **ID:** `%s`\n", s.ID)
 	fmt.Fprintf(&b, "- **Account:** %s\n", s.AccountID)
 	fmt.Fprintf(&b, "- **Model:** %s\n", s.Model)
-	fmt.Fprintf(&b, "- **Permission Mode:** %s\n", s.PermissionMode)
 	fmt.Fprintf(&b, "- **Status:** %s\n", s.Status)
 	fmt.Fprintf(&b, "- **Messages:** %d\n", s.MessageCount)
 	fmt.Fprintf(&b, "- **Created:** %s\n", s.CreatedAt)
-	if s.LastMessageAt != "" {
-		fmt.Fprintf(&b, "- **Last Message:** %s\n", s.LastMessageAt)
-	}
-	if s.Workspace != "" {
-		fmt.Fprintf(&b, "- **Workspace:** %s\n", s.Workspace)
-	}
-	if s.MaxBudget > 0 {
-		fmt.Fprintf(&b, "- **Max Budget:** $%.2f\n", s.MaxBudget)
-	}
-	fmt.Fprintf(&b, "- **Total Tokens In:** %d\n", s.TotalTokensIn)
-	fmt.Fprintf(&b, "- **Total Tokens Out:** %d\n", s.TotalTokensOut)
-	fmt.Fprintf(&b, "- **Total Cost:** $%.4f\n", s.TotalCostUSD)
-	if len(s.AllowedTools) > 0 {
-		fmt.Fprintf(&b, "- **Allowed Tools:** %s\n", strings.Join(s.AllowedTools, ", "))
-	}
 
 	if len(turns) > 0 {
 		fmt.Fprintf(&b, "\n---\n\n### Recent Messages (%d)\n\n", len(turns))
@@ -383,8 +426,6 @@ func formatSessionDetailMD(s *storage.Session, turns []*storage.Turn) string {
 			fmt.Fprintf(&b, "#### Turn %d — %s\n\n", t.Number, t.Timestamp)
 			fmt.Fprintf(&b, "**User:** %s\n\n", truncate(t.UserPrompt, 200))
 			fmt.Fprintf(&b, "**Response:** %s\n\n", truncate(t.Response, 500))
-			fmt.Fprintf(&b, "_Model: %s | Tokens: %d in / %d out | Cost: $%.4f | Duration: %dms_\n\n",
-				t.Model, t.TokensIn, t.TokensOut, t.CostUSD, t.DurationMs)
 		}
 	}
 
