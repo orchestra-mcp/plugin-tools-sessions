@@ -70,6 +70,9 @@ type Turn struct {
 	Model      string  `json:"model"`
 	DurationMs int64   `json:"duration_ms"`
 	Timestamp  string  `json:"timestamp"`
+	// Events is an optional JSON string containing tool events for this turn.
+	// Stored so that sessions can be fully reconstructed on page refresh.
+	Events string `json:"events,omitempty"`
 }
 
 // ---------- Session operations ----------
@@ -201,6 +204,9 @@ func (ds *DataStorage) WriteTurn(ctx context.Context, sessionID string, turn *Tu
 	}
 	path := turnFilePath(sessionID, turn.Number)
 	body := fmt.Sprintf("## User\n\n%s\n\n## Response\n\n%s\n", turn.UserPrompt, turn.Response)
+	if turn.Events != "" {
+		body += fmt.Sprintf("\n## Events\n\n```json\n%s\n```\n", turn.Events)
+	}
 	return ds.storageWrite(ctx, path, meta, []byte(body), 0)
 }
 
@@ -220,14 +226,26 @@ func (ds *DataStorage) ReadTurn(ctx context.Context, sessionID string, turnNumbe
 	// Extract response body from storage content.
 	if len(resp.Content) > 0 {
 		content := string(resp.Content)
-		// The body format is: ## User\n\n...\n\n## Response\n\n...
-		if idx := strings.Index(content, "## Response\n\n"); idx >= 0 {
-			turn.Response = strings.TrimSpace(content[idx+len("## Response\n\n"):])
-		}
+		// The body format is: ## User\n\n...\n\n## Response\n\n...\n\n## Events\n\n```json\n...\n```
 		if idx := strings.Index(content, "## User\n\n"); idx >= 0 {
 			endIdx := strings.Index(content, "\n\n## Response")
 			if endIdx > idx {
 				turn.UserPrompt = strings.TrimSpace(content[idx+len("## User\n\n") : endIdx])
+			}
+		}
+		if idx := strings.Index(content, "## Response\n\n"); idx >= 0 {
+			responseStart := idx + len("## Response\n\n")
+			responseEnd := len(content)
+			if evIdx := strings.Index(content, "\n\n## Events\n\n"); evIdx > idx {
+				responseEnd = evIdx
+			}
+			turn.Response = strings.TrimSpace(content[responseStart:responseEnd])
+		}
+		// Extract events JSON from ```json ... ``` block.
+		if idx := strings.Index(content, "## Events\n\n```json\n"); idx >= 0 {
+			start := idx + len("## Events\n\n```json\n")
+			if end := strings.Index(content[start:], "\n```"); end >= 0 {
+				turn.Events = content[start : start+end]
 			}
 		}
 	}
@@ -481,6 +499,9 @@ func turnToMetadata(t *Turn) (*structpb.Struct, error) {
 		"model":       t.Model,
 		"duration_ms": float64(t.DurationMs),
 		"timestamp":   t.Timestamp,
+	}
+	if t.Events != "" {
+		m["events"] = t.Events
 	}
 	return structpb.NewStruct(m)
 }

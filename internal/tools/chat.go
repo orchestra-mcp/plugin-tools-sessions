@@ -30,6 +30,10 @@ func SendMessageSchema() *structpb.Struct {
 				"type":        "string",
 				"description": "Override the session's permission mode for this message (e.g., default, plan, bypassPermissions)",
 			},
+			"model": map[string]any{
+				"type":        "string",
+				"description": "Override the model for this message (e.g., claude-sonnet-4-20250514, claude-opus-4-6)",
+			},
 		},
 		"required": []any{"session_id", "message"},
 	})
@@ -56,6 +60,7 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 		sessionID := helpers.GetString(req.Arguments, "session_id")
 		message := helpers.GetString(req.Arguments, "message")
 		permissionModeOverride := helpers.GetString(req.Arguments, "permission_mode")
+		modelOverride := helpers.GetString(req.Arguments, "model")
 
 		// Step 1: Read session metadata.
 		session, version, err := store.ReadSession(ctx, sessionID)
@@ -99,6 +104,12 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 			session.PermissionMode = permissionModeOverride
 		}
 
+		// Allow per-message model override so the frontend can switch models
+		// without recreating the session.
+		if modelOverride != "" {
+			session.Model = modelOverride
+		}
+
 		// Step 4: Call bridge spawn_session.
 		startTime := time.Now()
 		// Resume only when we have a confirmed Claude session ID from a
@@ -122,17 +133,21 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 		durationMs := time.Since(startTime).Milliseconds()
 
 		// Extract response data from the bridge response.
-		responseText := extractText(spawnResp)
-		tokensIn := extractInt64(spawnResp, "tokens_in")
-		tokensOut := extractInt64(spawnResp, "tokens_out")
-		costUSD := extractFloat64(spawnResp, "cost_usd")
-		model := extractString(spawnResp, "model")
+		// New bridge format returns JSON in the "text" field with all metadata.
+		br := parseBridgeResponse(spawnResp)
+		responseText := br.Response
+		tokensIn := br.TokensIn
+		tokensOut := br.TokensOut
+		costUSD := br.CostUSD
+		model := br.Model
 		if model == "" {
 			model = session.Model
 		}
 		// Capture the actual claude session ID from a successful response.
 		// This is what we use for --resume on subsequent turns.
-		if claudeID := extractClaudeSessionID(spawnResp, responseText); claudeID != "" {
+		if br.SessionID != "" {
+			session.ClaudeSessionID = br.SessionID
+		} else if claudeID := extractClaudeSessionID(spawnResp, responseText); claudeID != "" {
 			session.ClaudeSessionID = claudeID
 		}
 
@@ -149,6 +164,7 @@ func SendMessage(store *storage.DataStorage) ToolHandler {
 			Model:      model,
 			DurationMs: durationMs,
 			Timestamp:  now,
+			Events:     br.ToolEvents,
 		}
 
 		_, err = store.WriteTurn(ctx, sessionID, turn)
@@ -308,6 +324,75 @@ func reportUsage(ctx context.Context, store *storage.DataStorage, accountID, ses
 
 // ---------- Response extraction helpers ----------
 
+// bridgeResponse holds the parsed fields from a bridge spawn_session response.
+type bridgeResponse struct {
+	Response   string
+	SessionID  string
+	Model      string
+	TokensIn   int64
+	TokensOut  int64
+	CostUSD    float64
+	DurationMs int64
+	ToolEvents string // JSON array of tool events (stored as-is)
+}
+
+// parseBridgeResponse extracts all fields from the bridge response.
+// New bridge format: the "text" field contains a JSON string with structured data.
+// Falls back to individual field extraction for old bridge format.
+func parseBridgeResponse(resp *pluginv1.ToolResponse) bridgeResponse {
+	var br bridgeResponse
+	if resp == nil || resp.Result == nil {
+		return br
+	}
+
+	// Try new JSON format in "text" field.
+	if v, ok := resp.Result.Fields["text"]; ok {
+		if sv, ok := v.Kind.(*structpb.Value_StringValue); ok {
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(sv.StringValue), &parsed); err == nil {
+				if s, ok := parsed["response"].(string); ok {
+					br.Response = s
+				}
+				if s, ok := parsed["session_id"].(string); ok {
+					br.SessionID = s
+				}
+				if s, ok := parsed["model"].(string); ok {
+					br.Model = s
+				}
+				if n, ok := parsed["tokens_in"].(float64); ok {
+					br.TokensIn = int64(n)
+				}
+				if n, ok := parsed["tokens_out"].(float64); ok {
+					br.TokensOut = int64(n)
+				}
+				if n, ok := parsed["cost_usd"].(float64); ok {
+					br.CostUSD = n
+				}
+				if n, ok := parsed["duration_ms"].(float64); ok {
+					br.DurationMs = int64(n)
+				}
+				// Extract tool_events as a raw JSON string for storage.
+				if evts, ok := parsed["tool_events"]; ok && evts != nil {
+					if raw, err := json.Marshal(evts); err == nil {
+						br.ToolEvents = string(raw)
+					}
+				}
+				return br
+			}
+		}
+	}
+
+	// Fallback: old bridge format with individual fields.
+	br.Response = extractText(resp)
+	br.SessionID = extractString(resp, "session_id")
+	br.Model = extractString(resp, "model")
+	br.TokensIn = extractInt64(resp, "tokens_in")
+	br.TokensOut = extractInt64(resp, "tokens_out")
+	br.CostUSD = extractFloat64(resp, "cost_usd")
+	br.DurationMs = extractInt64(resp, "duration_ms")
+	return br
+}
+
 func extractText(resp *pluginv1.ToolResponse) string {
 	if resp == nil || resp.Result == nil {
 		return ""
@@ -315,7 +400,16 @@ func extractText(resp *pluginv1.ToolResponse) string {
 	// Try "text" field first (standard MCP response).
 	if v, ok := resp.Result.Fields["text"]; ok {
 		if sv, ok := v.Kind.(*structpb.Value_StringValue); ok {
-			return sv.StringValue
+			text := sv.StringValue
+			// New bridge format: JSON with structured fields.
+			// Parse and return only the "response" field (clean text).
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+				if response, ok := parsed["response"].(string); ok {
+					return response
+				}
+			}
+			return text
 		}
 	}
 	// Try "response" field.
@@ -379,19 +473,29 @@ func extractFloat64(resp *pluginv1.ToolResponse, key string) float64 {
 }
 
 // extractClaudeSessionID extracts the actual claude session UUID from the
-// bridge response text. The formatChatResponse in bridge-claude embeds the
-// session ID as "- **Session:** <uuid>". We parse that line to get the real
-// claude session ID for --resume on subsequent turns.
+// bridge response. New bridge format returns structured JSON in the "text"
+// field with a "session_id" key. Falls back to parsing markdown for old format.
 func extractClaudeSessionID(resp *pluginv1.ToolResponse, responseText string) string {
-	_ = resp // reserved for future structured field extraction
-	// Look for the "- **Session:** <uuid>" line embedded by formatChatResponse.
+	// Try structured JSON first (new bridge format).
+	if resp != nil && resp.Result != nil {
+		if v, ok := resp.Result.Fields["text"]; ok {
+			if sv, ok := v.Kind.(*structpb.Value_StringValue); ok {
+				var parsed map[string]any
+				if err := json.Unmarshal([]byte(sv.StringValue), &parsed); err == nil {
+					if sid, ok := parsed["session_id"].(string); ok && len(sid) == 36 && strings.Count(sid, "-") == 4 {
+						return sid
+					}
+				}
+			}
+		}
+	}
+	// Fallback: parse "- **Session:** <uuid>" from old markdown format.
 	for _, line := range strings.Split(responseText, "\n") {
 		line = strings.TrimSpace(line)
 		const prefix = "- **Session:** "
 		if strings.HasPrefix(line, prefix) {
 			id := strings.TrimPrefix(line, prefix)
 			id = strings.TrimSpace(id)
-			// Basic UUID validation: 36 chars with dashes.
 			if len(id) == 36 && strings.Count(id, "-") == 4 {
 				return id
 			}

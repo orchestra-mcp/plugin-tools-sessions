@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -371,15 +372,16 @@ type sessionDetailJSON struct {
 }
 
 type turnJSON struct {
-	Number    int     `json:"number"`
-	User      string  `json:"user"`
-	Assistant string  `json:"assistant"`
-	Model     string  `json:"model,omitempty"`
-	TokensIn  int64   `json:"tokens_in,omitempty"`
-	TokensOut int64   `json:"tokens_out,omitempty"`
-	Cost      float64 `json:"cost,omitempty"`
-	Duration  int64   `json:"duration_ms,omitempty"`
-	Timestamp string  `json:"timestamp"`
+	Number    int              `json:"number"`
+	User      string           `json:"user"`
+	Assistant string           `json:"assistant"`
+	Model     string           `json:"model,omitempty"`
+	TokensIn  int64            `json:"tokens_in,omitempty"`
+	TokensOut int64            `json:"tokens_out,omitempty"`
+	Cost      float64          `json:"cost,omitempty"`
+	Duration  int64            `json:"duration_ms,omitempty"`
+	Timestamp string           `json:"timestamp"`
+	Events    json.RawMessage  `json:"events,omitempty"`
 }
 
 func buildSessionDetailJSON(s *storage.Session, turns []*storage.Turn) *sessionDetailJSON {
@@ -394,7 +396,7 @@ func buildSessionDetailJSON(s *storage.Session, turns []*storage.Turn) *sessionD
 		Turns:     make([]turnJSON, 0, len(turns)),
 	}
 	for _, t := range turns {
-		detail.Turns = append(detail.Turns, turnJSON{
+		tj := turnJSON{
 			Number:    t.Number,
 			User:      t.UserPrompt,
 			Assistant: t.Response,
@@ -404,7 +406,11 @@ func buildSessionDetailJSON(s *storage.Session, turns []*storage.Turn) *sessionD
 			Cost:      t.CostUSD,
 			Duration:  t.DurationMs,
 			Timestamp: t.Timestamp,
-		})
+		}
+		if t.Events != "" {
+			tj.Events = json.RawMessage(t.Events)
+		}
+		detail.Turns = append(detail.Turns, tj)
 	}
 	return detail
 }
@@ -424,17 +430,11 @@ func formatSessionDetailMD(s *storage.Session, turns []*storage.Turn) string {
 		fmt.Fprintf(&b, "\n---\n\n### Recent Messages (%d)\n\n", len(turns))
 		for _, t := range turns {
 			fmt.Fprintf(&b, "#### Turn %d — %s\n\n", t.Number, t.Timestamp)
-			fmt.Fprintf(&b, "**User:** %s\n\n", truncate(t.UserPrompt, 200))
-			fmt.Fprintf(&b, "**Response:** %s\n\n", truncate(t.Response, 500))
+			fmt.Fprintf(&b, "**User:** %s\n\n", t.UserPrompt)
+			fmt.Fprintf(&b, "**Response:** %s\n\n", t.Response)
 		}
 	}
 
 	return b.String()
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
